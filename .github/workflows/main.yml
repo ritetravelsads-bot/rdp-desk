@@ -15,33 +15,30 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
             -Name "fDenyTSConnections" -Value 0 -Force
 
-          # Disable NLA for compatibility
+          # Disable Network Level Authentication (for compatibility)
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
             -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
             -Name "SecurityLayer" -Value 0 -Force
 
-          # Firewall rule for RDP
+          # Allow RDP in firewall
           netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
           netsh advfirewall firewall add rule name="RDP-Tailscale" `
             dir=in action=allow protocol=TCP localport=3389
 
-          # Restart RDP service
           Restart-Service -Name TermService -Force
 
-      - name: Create RDP User (Custom Password)
+      - name: Create RDP User (Policy-Safe Password)
         run: |
           $username = "RDP"
-          $plainPassword = "RDPUser1234!"
+          $plainPassword = "EasyUser1234!"
 
           $securePass = ConvertTo-SecureString $plainPassword -AsPlainText -Force
 
-          # Remove user if already exists
           if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
               Remove-LocalUser -Name $username
           }
 
-          # Create user
           New-LocalUser `
             -Name $username `
             -Password $securePass `
@@ -49,7 +46,6 @@ jobs:
             -PasswordNeverExpires `
             -UserMayNotChangePassword
 
-          # Grant permissions
           Add-LocalGroupMember -Group "Administrators" -Member $username
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
 
@@ -89,24 +85,24 @@ jobs:
 
       - name: Verify RDP Accessibility
         run: |
-          Write-Host "Testing RDP on $env:TAILSCALE_IP"
-          $result = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          Write-Host "Testing RDP access on $env:TAILSCALE_IP"
+          $test = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
 
-          if (-not $result.TcpTestSucceeded) {
-              Write-Error "RDP port 3389 not reachable"
+          if (-not $test.TcpTestSucceeded) {
+              Write-Error "RDP port not reachable"
               exit 1
           }
 
-          Write-Host "RDP is reachable"
+          Write-Host "RDP connection successful"
 
       - name: Maintain Connection
         run: |
           Write-Host ""
-          Write-Host "================ RDP ACCESS ================"
+          Write-Host "=========== RDP ACCESS DETAILS ==========="
           Write-Host "Address  : $env:TAILSCALE_IP"
           Write-Host "Username : RDP"
-          Write-Host "Password : RDPUser1234!"
-          Write-Host "============================================"
+          Write-Host "Password : EasyUser1234!"
+          Write-Host "=========================================="
           Write-Host ""
 
           while ($true) {
