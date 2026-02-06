@@ -11,89 +11,105 @@ jobs:
     steps:
       - name: Configure Core RDP Settings
         run: |
-          # Enable Remote Desktop and disable Network Level Authentication
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+          # Enable Remote Desktop
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name "fDenyTSConnections" -Value 0 -Force
 
-          # Open Firewall for RDP
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          # Disable NLA for compatibility
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "SecurityLayer" -Value 0 -Force
 
+          # Firewall rule for RDP
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
+          netsh advfirewall firewall add rule name="RDP-Tailscale" `
+            dir=in action=allow protocol=TCP localport=3389
+
+          # Restart RDP service
           Restart-Service -Name TermService -Force
 
-      - name: Disable Password Complexity & Create User
+      - name: Create RDP User (Custom Password)
         run: |
-          # 1. Export current security policy
-          secedit /export /cfg config.inf
+          $username = "RDP"
+          $plainPassword = "RDPUser1234!"
 
-          # 2. Modify policy to allow simple passwords and zero length requirements
-          (Get-Content config.inf) -replace 'PasswordComplexity = 1', 'PasswordComplexity = 0' `
-                                   -replace 'MinimumPasswordLength = \d+', 'MinimumPasswordLength = 0' | 
-                                   Set-Content config.inf
+          $securePass = ConvertTo-SecureString $plainPassword -AsPlainText -Force
 
-          # 3. Apply the new policy
-          secedit /configure /db $env:windir\security\local.sdb /cfg config.inf /overwrite
-
-          # 4. Create user with custom password
-          $password = "12345678"
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          
-          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-          
-          if (-not (Get-LocalUser -Name "RDP")) {
-              Write-Error "User creation failed even after policy override."
-              exit 1
+          # Remove user if already exists
+          if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
+              Remove-LocalUser -Name $username
           }
+
+          # Create user
+          New-LocalUser `
+            -Name $username `
+            -Password $securePass `
+            -AccountNeverExpires `
+            -PasswordNeverExpires `
+            -UserMayNotChangePassword
+
+          # Grant permissions
+          Add-LocalGroupMember -Group "Administrators" -Member $username
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
+
+          echo "RDP_CREDS=User: $username | Password: $plainPassword" >> $env:GITHUB_ENV
+          Write-Host "RDP user created successfully"
 
       - name: Install Tailscale
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
+
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
 
       - name: Establish Tailscale Connection
         run: |
-          # Ensure you have TAILSCALE_AUTH_KEY set in your GitHub Repo Secrets
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
-          
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
+            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} `
+            --hostname=gh-runner-$env:GITHUB_RUN_ID
+
           $tsIP = $null
           $retries = 0
+
           while (-not $tsIP -and $retries -lt 10) {
               $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
               Start-Sleep -Seconds 5
               $retries++
           }
-          
+
           if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Check your Auth Key."
+              Write-Error "Tailscale IP not assigned"
               exit 1
           }
+
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-      
+
       - name: Verify RDP Accessibility
         run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
+          Write-Host "Testing RDP on $env:TAILSCALE_IP"
+          $result = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+
+          if (-not $result.TcpTestSucceeded) {
+              Write-Error "RDP port 3389 not reachable"
               exit 1
           }
-          Write-Host "TCP connectivity successful!"
+
+          Write-Host "RDP is reachable"
 
       - name: Maintain Connection
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: RDP"
-          Write-Host "Password: 12345678"
-          Write-Host "==================`n"
-          
+          Write-Host ""
+          Write-Host "================ RDP ACCESS ================"
+          Write-Host "Address  : $env:TAILSCALE_IP"
+          Write-Host "Username : RDP"
+          Write-Host "Password : RDPUser1234!"
+          Write-Host "============================================"
+          Write-Host ""
+
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Keep this tab open to stay connected"
+              Write-Host "[$(Get-Date)] RDP ACTIVE"
               Start-Sleep -Seconds 300
           }
