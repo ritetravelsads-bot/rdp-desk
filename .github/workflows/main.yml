@@ -16,25 +16,35 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
 
+          # Open Firewall for RDP
           netsh advfirewall firewall delete rule name="RDP-Tailscale"
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
 
           Restart-Service -Name TermService -Force
 
-      - name: Create RDP User with Custom Password
+      - name: Disable Password Complexity & Create User
         run: |
-          $password = "RDPUser1234!"
+          # 1. Export current security policy
+          secedit /export /cfg config.inf
+
+          # 2. Modify policy to allow simple passwords and zero length requirements
+          (Get-Content config.inf) -replace 'PasswordComplexity = 1', 'PasswordComplexity = 0' `
+                                   -replace 'MinimumPasswordLength = \d+', 'MinimumPasswordLength = 0' | 
+                                   Set-Content config.inf
+
+          # 3. Apply the new policy
+          secedit /configure /db $env:windir\security\local.sdb /cfg config.inf /overwrite
+
+          # 4. Create user with custom password
+          $password = "12345678"
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
           
-          # Create the user
           New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
           
-          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
-          
           if (-not (Get-LocalUser -Name "RDP")) {
-              Write-Error "User creation failed"
+              Write-Error "User creation failed even after policy override."
               exit 1
           }
 
@@ -48,6 +58,7 @@ jobs:
 
       - name: Establish Tailscale Connection
         run: |
+          # Ensure you have TAILSCALE_AUTH_KEY set in your GitHub Repo Secrets
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
           
           $tsIP = $null
@@ -59,7 +70,7 @@ jobs:
           }
           
           if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting."
+              Write-Error "Tailscale IP not assigned. Check your Auth Key."
               exit 1
           }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
@@ -79,10 +90,10 @@ jobs:
           Write-Host "`n=== RDP ACCESS ==="
           Write-Host "Address: $env:TAILSCALE_IP"
           Write-Host "Username: RDP"
-          Write-Host "Password: RDPUser1234!"
+          Write-Host "Password: 12345678"
           Write-Host "==================`n"
           
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+              Write-Host "[$(Get-Date)] RDP Active - Keep this tab open to stay connected"
               Start-Sleep -Seconds 300
           }
